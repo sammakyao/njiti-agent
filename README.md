@@ -6,6 +6,8 @@ streams back an answer with links to where it came from.
 
 ## Run it
 
+Needs Python 3.10 or newer (the Python that ships with macOS is 3.9: use `brew install python@3.12`).
+
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
