@@ -13,5 +13,5 @@ tenacity>=8.2
 
 # Knowledge base (BigQuery vector store + PDF loading)
 langchain-community>=0.4
-langchain-google-community[bigquery]>=3.0
+langchain-google-community[featurestore]>=3.0
 pypdf>=5.0
