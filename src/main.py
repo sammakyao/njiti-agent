@@ -15,6 +15,11 @@ from langchain_text_splitters import RecursiveJsonSplitter
 
 load_dotenv()
 
+# An empty OPENAI_BASE_URL= line in .env would otherwise be used as the address by the OpenAI client
+for name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
+    if not os.environ.get(name, "").strip():
+        os.environ.pop(name, None)
+
 splitter = RecursiveJsonSplitter(max_chunk_size=600)
 
 # Model configurations (override with NJITI_MODEL / NJITI_FAST_MODEL)
