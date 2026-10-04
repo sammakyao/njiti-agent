@@ -23,8 +23,8 @@ for name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
 splitter = RecursiveJsonSplitter(max_chunk_size=600)
 
 # Model configurations (override with NJITI_MODEL / NJITI_FAST_MODEL)
-SMART = os.getenv("NJITI_MODEL", "anthropic.claude-3-7-sonnet-20250219-v1-0")
-DUMB = os.getenv("NJITI_FAST_MODEL", "gemini-2.0-flash-001")
+SMART = os.getenv("NJITI_MODEL") or "anthropic.claude-3-7-sonnet-20250219-v1-0"
+DUMB = os.getenv("NJITI_FAST_MODEL") or "gemini-2.0-flash-001"
 
 # Credentials for the OpenAI-compatible endpoint (OpenAI itself, or a proxy such as LiteLLM)
 API_KEY = os.getenv("OPENAI_API_KEY")
@@ -47,10 +47,14 @@ def create_model(api_key: str, model_name: str, base_url: Optional[str] = None):
     model_params = {
         "api_key": api_key,
         "model_name": model_name,
-        "temperature": 0.0,
         "max_retries": 2,
     }
-    
+
+    # Newer reasoning models only accept their default temperature, so it is opt-in
+    temperature = os.getenv("NJITI_TEMPERATURE")
+    if temperature:
+        model_params["temperature"] = float(temperature)
+
     if base_url:
         model_params["base_url"] = base_url
         
