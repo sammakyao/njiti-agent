@@ -7,15 +7,23 @@ import json
 import os
 from typing import Optional, Any
 
+from dotenv import load_dotenv
+
 from langchain_openai import OpenAIEmbeddings
 from langchain_openai.chat_models import ChatOpenAI
 from langchain_text_splitters import RecursiveJsonSplitter
 
+load_dotenv()
+
 splitter = RecursiveJsonSplitter(max_chunk_size=600)
 
-# Model configurations
-SMART = "anthropic.claude-3-7-sonnet-20250219-v1-0"
-DUMB = "gemini-2.0-flash-001"
+# Model configurations (override with NJITI_MODEL / NJITI_FAST_MODEL)
+SMART = os.getenv("NJITI_MODEL", "anthropic.claude-3-7-sonnet-20250219-v1-0")
+DUMB = os.getenv("NJITI_FAST_MODEL", "gemini-2.0-flash-001")
+
+# Credentials for the OpenAI-compatible endpoint (OpenAI itself, or a proxy such as LiteLLM)
+API_KEY = os.getenv("OPENAI_API_KEY")
+BASE_URL = os.getenv("OPENAI_BASE_URL") or None
 
 class AuthHeaderHandler(BaseCallbackHandler):
     def on_retry(
@@ -41,9 +49,7 @@ def create_model(api_key: str, model_name: str, base_url: Optional[str] = None):
     if base_url:
         model_params["base_url"] = base_url
         
-    return ChatOpenAI(**model_params).with_config(
-        config={"tags": ["langsmith:nostream"]}
-    )
+    return ChatOpenAI(**model_params)
 
 def create_embedding_model(api_key: str, base_url: Optional[str] = None):
     """Create an embedding model instance"""

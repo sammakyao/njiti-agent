@@ -1,15 +1,20 @@
-# this is used during the extraction
-from langchain_core.prompts import ChatPromptTemplate
+import os
+from functools import lru_cache
+
 from langchain_core.tools import tool
-from langchain_text_splitters import RecursiveJsonSplitter
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import BaseModel, Field
 
-from src.main import create_model, SMART
-from typing import Optional, List
+from src.main import create_model, SMART, API_KEY, BASE_URL
 # Import the vector store search function
-from src.rag.BQ_db import search_knowledge_base
+from src.rag.BQ_db import search_knowledge_base, is_configured as knowledge_base_configured
+
+# Where premature_context comes from, so answers can link to it
+WHO_FACT_SHEET = {
+    "title": "WHO: Preterm birth fact sheet",
+    "url": "https://www.who.int/news-room/fact-sheets/detail/preterm-birth",
+    "kind": "who",
+}
 
 # This is the high-level context for the premature ai agent
 premature_context = """
@@ -82,100 +87,69 @@ premature_context = """
 
 """
 
+
 # System prompt
 system_prompt = """
-You are PrematureAI, an expert assistant specializing in all aspects of prematurity. Your purpose is to help clinicians, 
-researchers, and families understand, analyze, and answer questions about premature birth, neonatal care, outcomes, 
-and related research.
+You are Njiti, an expert assistant specializing in all aspects of prematurity ("njiti" is Swahili for a baby
+born too early). Your purpose is to help families, health workers, clinicians and researchers understand and
+answer questions about premature birth, neonatal care, outcomes, and related research.
 
 =====Your Role:=====
 
-- Only answer questions related to prematurity, neonatal care, preterm infants, and associated research or clinical topics.
+- Only answer questions related to prematurity, pregnancy and preterm birth, neonatal care, preterm infants, and
+  associated research or clinical topics.
 - Use facts from peer-reviewed literature, clinical guidelines, reputable medical sources, and established best practices.
 - Search the knowledge base for clinical protocols, research findings, and neonatal care documentation when relevant.
 - Never guess or make unsupported assumptions.
-- Use tools and external resources only when needed.
 - If a question is unclear or lacks necessary details, ask for clarification (e.g., gestational age, clinical context).
 - If unsure or out of scope, reply: "I'm not confident I can provide an accurate answer to that. Please try rephrasing or narrowing your question."
 
-- Respond quickly with progress updates if a query may take longer than 5 seconds. The progress update should be concise.
+=====Safety:=====
+
+- If the question describes danger signs in a baby (not breathing or struggling to breathe, blue lips or skin,
+  convulsions/fits, not feeding or unable to suck, very cold or hot to the touch, very sleepy or floppy, yellow
+  palms or soles, bleeding, a red or pus-filled umbilical cord), start your answer by telling them to take the
+  baby to the nearest health facility now. Then give brief safe actions for the way there (e.g. keep the baby
+  warm skin-to-skin).
+- Do the same for danger signs in pregnancy (bleeding, leaking fluid, regular contractions before 37 weeks,
+  severe headache or blurred vision, fever, the baby moving less).
+- You give general information, not a diagnosis. Never give medicine doses for a specific baby; refer to their
+  health worker.
 
 =====Thinking Process:=====
 
 - Think step-by-step before using tools or providing answers.
 - Be concise, clear, and accurate.
-- Use bullet points, field-value pairs, and brief explanations.
 - Use conversation history as memory, but do not carry memory across unrelated topics.
 
-=====Output Format (WhatsApp):=====
-- Use \*asterisks\* for all emphasis—\*no\* single-asterisk mistakes.
-- **Always** prefix all titles with your chosen emoji.
-  e.g. `🍼 *Prematurity Risk Factors*…`
-- **Always** bold and color key terms, values, and important findings.
-- **Do not** use any Markdown heading syntax (no `#`, `##`, or `###`).
-- For section titles or “headers,” simply write them in bold.
-  e.g.
-  *Neonatal Outcomes Summary*
-- Wrap single identifiers (like a study ID or code blocks) in inline backticks:
-  e.g.
-  `` `NCT01234567` ``
-- When you need a fixed-width table or block, wrap it in triple backticks (```…```) so Slack renders it properly.
-- Use bullet points (\-) or numbered lists for structure.
-- Leave a blank line before and after any triple-backtick block.
-- Keep replies under 3,000 characters; split into threaded follow-ups if needed.
+=====Language:=====
+- Reply in the language the user writes in (for example Swahili or English).
+- Use plain words a parent can follow; explain medical terms the first time you use them.
+
+=====Output Format (web chat, Markdown):=====
+- Start with a direct one or two sentence answer, then details.
+- Use short **bold** section titles (no `#` headings), bullet points and numbered steps.
+- Bold the key terms, values and important findings.
+- Cite where facts come from with inline Markdown links when a source has a URL,
+  e.g. [WHO](https://www.who.int/news-room/fact-sheets/detail/preterm-birth). Name the document for sources without a URL.
+- Keep replies under about 300 words unless the user asks for more.
 
 Your performance is measured by accuracy, usefulness, and clarity in helping users understand and analyze prematurity-related topics.
 """
 
 
-# Initialize the LLM model for medical queries
-llm = create_model("my-openai-api-key", SMART)
-
-# Create a prompt template for medical information extraction
-prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            "You are PrematureAI, an expert in prematurity and neonatal care. Provide accurate, evidence-based information."
-        ),
-        ("human", "Question: {question}"),
-    ]
-)
-
-# Chunk size for processing medical documents
-JSON_CHUNK_SIZE = 50000
-splitter = RecursiveJsonSplitter(max_chunk_size=JSON_CHUNK_SIZE)
-
-class MedicalInsight(BaseModel):
-    """Medical information extracted from documents"""
-    insight: str = Field(
-        ..., description="The key medical information or answer to the user's question."
-    )
-    source: str = Field(
-        ..., description="The source of this medical information."
-    )
-
-class MedicalResponse(BaseModel):
-    """Structured medical response"""
-
-    insights: List[MedicalInsight]
-
-extractor = prompt | llm.with_structured_output(
-    schema=MedicalResponse,
-    include_raw=False,
-)
-
-
 # Function to define Tools for the Agent
+# Each tool returns (text for the model, list of sources for the website to show)
 
-@tool
-def get_context() -> str:
-    """To best answer questions about prematurity and neonatal care, this function provides context information."""
-    return premature_context
+@tool(response_format="content_and_artifact")
+def get_context() -> tuple[str, list[dict]]:
+    """To best answer questions about prematurity and neonatal care, this function provides context information
+    from the WHO preterm birth fact sheet."""
+    return f"Source: {WHO_FACT_SHEET['title']} ({WHO_FACT_SHEET['url']})\n{premature_context}", [WHO_FACT_SHEET]
 
-@tool
-def search_preterm_knowledge(query: str) -> str:
-    """Search the Preterm knowledge base for relevant information.
+@tool(response_format="content_and_artifact")
+def search_preterm_knowledge(query: str) -> tuple[str, list[dict]]:
+    """Search the Preterm knowledge base (clinical guidelines, protocols and research documents) for relevant information.
 
     Args:
         query (str): The search query to find relevant information or context
@@ -183,32 +157,35 @@ def search_preterm_knowledge(query: str) -> str:
     Returns:
         str: Relevant context from Preterm related documentation
     """
+    if not knowledge_base_configured():
+        return "The knowledge base is not available right now. Use get_context instead.", []
+
     try:
-        results = search_preterm_knowledge(query, k=3)  # Get top 3 most relevant documents
+        results = search_knowledge_base(query, k=3)  # Get top 3 most relevant documents
 
         if not results:
-            return "No relevant information found in the knowledge base."
+            return "No relevant information found in the knowledge base.", []
 
         # This formats the context parts for better readability
         # It extracts source information from the metadata of each document and formats it nicely.
         context_parts = []
+        sources = []
         for doc in results:
-            source_type = doc.metadata.get('source_type', 'Unknown')
-            source_file = doc.metadata.get('source_file', 'Unknown source')
+            source_file = doc.metadata.get('source_file') or doc.metadata.get('source', 'Unknown source')
+            title = os.path.basename(source_file)
+            page = doc.metadata.get('page')
+            if page is not None:
+                title = f"{title}, page {int(page) + 1}"  # PyPDFLoader pages start at 0
 
-            # This formats source information
-            if source_type == 'pdf':
-                source_info = f"Source: {source_file.split('/')[-1]}"  # Just filename
-            else:
-                source_info = f"Source: {source_file}"
-
-            context_parts.append(f"{source_info}\n{doc.page_content}")
+            url = doc.metadata.get('url')
+            sources.append({"title": title, "url": url, "kind": "document"})
+            context_parts.append(f"Source: {title}" + (f" ({url})" if url else "") + f"\n{doc.page_content}")
 
         # Join all context parts with a separator for better readability
-        return "\n\n---\n\n".join(context_parts)
+        return "\n\n---\n\n".join(context_parts), sources
 
     except Exception as e:
-        return f"Error searching knowledge base: {str(e)}"
+        return f"Error searching knowledge base: {str(e)}", []
 """
 This code defines the tools for the PrematureAI agent:
 The first tool, get_context, provides context information about prematurity and neonatal care.
@@ -220,21 +197,20 @@ tools = [get_context, search_preterm_knowledge]
 
 checkpointer = InMemorySaver()
 
-# Function to initialize the Agent
-agent = create_react_agent(
-    tools =tools,
-    model =llm,
-    checkpointer=checkpointer,
-    prompt=system_prompt
-)
+# Function to initialize the Agent. Built on first use so the app can start before credentials are set.
+@lru_cache(maxsize=1)
+def get_agent():
+    if not API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set")
 
-config = {
-    "configurable": {
-        "thread_id": "1"
+    llm = create_model(API_KEY, SMART, BASE_URL)
+    return create_react_agent(
+        tools=tools,
+        model=llm,
+        checkpointer=checkpointer,
+        prompt=system_prompt
+    )
 
-    },
-
-}
 # This is langgraph's stream function to print updates and messages from the agent
 def print_stream(stream, output_messages_key="llm_input_messages"):
     for chunk in stream:
@@ -251,13 +227,15 @@ def print_stream(stream, output_messages_key="llm_input_messages"):
 
         print("\n\n")
 
-# This is the main function that initializes the agent and starts a loop to accept user input
-# This can be removed if you want to use the agent in a different way, such as in a web application or another interface.
+# Console version of the agent. The website (src/server.py) uses the same agent.
 if __name__ == "__main__":
+    agent = get_agent()
+    config = {"configurable": {"thread_id": "cli"}}
     print("Agent initialized. You can now use it to ask preterm related knowledge.")
     while True:
         user_input = input("User: ")
         if user_input.lower() in ('exit', 'quit'):
             print("Exiting the agent.")
+            break
         inputs = {"messages": [{"role": "user", "content": user_input}]}
         print_stream(agent.stream(inputs, stream_mode="updates", config=config))
